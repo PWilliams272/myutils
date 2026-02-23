@@ -23,6 +23,8 @@ class InteractiveTimeSeriesPlot:
         legend_labels=None,
         x_axis_label=None,
         show_plot=False,
+        plot_width=1500,
+        plot_height=350,
     ):
         self.df = df
         self.date_col = date_col
@@ -41,7 +43,7 @@ class InteractiveTimeSeriesPlot:
         self.x_axis_label = x_axis_label or "Date"
         self.show_plot = show_plot
         self.colors = Category10[10]
-        self.p = figure(x_axis_type="datetime", width=1500, height=350)
+        self.p = figure(x_axis_type="datetime", width=plot_width, height=plot_height)
         self.p.xaxis.axis_label = None
         self.p.extra_y_ranges = {}
         self.p.extra_y_ranges["default"] = self.p.y_range
@@ -73,15 +75,34 @@ class InteractiveTimeSeriesPlot:
 
     def add_moving_average(self, df_ma, kernel=None, bandwidth=None, add_sliders=True):
         self.df_ma = df_ma
-        self.kernels = sorted(df_ma["kernel"].unique())
-        self.bandwidths = sorted(df_ma["bandwidth"].unique())
+        # Infer kernels and bandwidths from column names in wide format
+        import re
+        param = self.value_cols[0]  # Use the first plotted parameter
+        pattern = re.compile(rf"^{re.escape(param)}_(.*?)_(.*?)$")
+        kernels = set()
+        bandwidths = set()
+        for col in df_ma.columns:
+            m = pattern.match(col)
+            if m:
+                kernels.add(m.group(1))
+                try:
+                    bw = float(m.group(2))
+                    if bw.is_integer():
+                        bw = int(bw)
+                    bandwidths.add(bw)
+                except Exception:
+                    pass
+        self.kernels = sorted(kernels)
+        self.bandwidths = sorted(bandwidths)
         self.initial_kernel = kernel or self.kernels[0]
         self.initial_bandwidth = bandwidth or self.bandwidths[0]
         self.ma_source = ColumnDataSource({})
         # Set initial data
-        df_ma_init = df_ma[(df_ma["kernel"] == self.initial_kernel) & (df_ma["bandwidth"] == self.initial_bandwidth)]
-        ma_data = {col: df_ma_init[col].values for col in self.value_cols}
-        ma_data["date"] = pd.to_datetime(df_ma_init["date"]).values.astype(np.int64) // 10**6
+        ma_data = {}
+        for col in self.value_cols:
+            colname = f"{col}_{self.initial_kernel}_{self.initial_bandwidth}"
+            ma_data[col] = df_ma[colname].values if colname in df_ma.columns else [None]*len(df_ma)
+        ma_data["date"] = pd.to_datetime(df_ma["date"]).values.astype(np.int64) // 10**6
         self.ma_source.data = ma_data
         self.ma_renderers = {}
         for idx, col in enumerate(self.value_cols):
@@ -89,9 +110,7 @@ class InteractiveTimeSeriesPlot:
             axis = self.y_axes[idx]
             line = self.p.line("date", col, color=color, y_range_name=axis, line_width=2, source=self.ma_source)
             self.ma_renderers[col] = line
-        # Do not add to self.renderers here; group in add_legend
         if add_sliders:
-            # --- Patch: preserve axis ranges on MA update ---
             kernel_select, bandwidth_slider, ma_callback = moving_average_controls(
                 self.df_ma, self.value_cols, self.kernels, self.bandwidths, self.initial_kernel, self.initial_bandwidth, self.ma_source
             )
@@ -194,7 +213,7 @@ class InteractiveTimeSeriesPlot:
         for idx, col in enumerate(self.value_cols):
             color = self.colors[idx % len(self.colors)]
             axis = self.y_axes[idx]
-            scatter = self.p.scatter(self.df[self.date_col], self.df[col], color=color, y_range_name=axis, size=6, alpha=0.25)
+            scatter = self.p.scatter(self.df[self.date_col], self.df[col], color=color, y_range_name=axis, size=4, alpha=0.1)
             self.scatter_renderers[col] = scatter
         # Do not add to self.renderers here; group in add_legend
 
@@ -386,20 +405,32 @@ class InteractiveTimeSeriesPlot:
             return self.layout
         # --- Fixed split layout option ---
         if layout_mode == 'split':
-            # Left: controls row, then each y-slider stacked
             left_col = []
+            # Add section header for MA controls if present
+            if self.kernel_select is not None or self.bandwidth_slider is not None:
+                ma_header = Div(text="<b>Moving Average Parameters</b>")
+                ma_header.styles = {"margin-bottom": "6px", "font-size": "15px"}
+                left_col.append(ma_header)
             # PATCH: arrange controls vertically (kernel dropdown above bandwidth slider)
             if self.kernel_select is not None and self.bandwidth_slider is not None:
                 controls_group = column(self.kernel_select, self.bandwidth_slider, sizing_mode="stretch_width", spacing=10)
                 left_col.append(controls_group)
             elif self.controls_row is not None:
                 left_col.append(self.controls_row)
-            # Stack each y-slider individually (not as a row)
+            # Always add a more visible horizontal line for separation before Y-Axis Range(s)
+            hr = Div(text='<hr style="border:none;border-top:2px solid #bbb;margin:18px 0 12px 0;">')
+            left_col.append(hr)
+            y_header = Div(text="<b>Y-Axis Range(s)</b>")
+            y_header.styles = {"margin-bottom": "6px", "font-size": "15px"}
+            left_col.append(y_header)
             if hasattr(self, 'y_sliders') and self.y_sliders:
                 for s in self.y_sliders:
                     left_col.append(s)
-            left = column(*left_col, sizing_mode="stretch_width") if left_col else None
+            left = column(*left_col, sizing_mode="stretch_width", max_width=350) if left_col else None
             # Right: plot, then x-slider (and label if present)
+            # PATCH: make plot fill width but not overflow
+            self.p.sizing_mode = "stretch_width"
+            self.p.max_width = 1200  # Cap plot width
             right_col = [self.p]
             x_slider_group = None
             if add_x_slider and self.x_slider is not None and self.x_label is not None:
@@ -410,9 +441,9 @@ class InteractiveTimeSeriesPlot:
                 x_slider_group = self.x_label
             if x_slider_group is not None:
                 right_col.append(x_slider_group)
-            right = column(*right_col, sizing_mode="stretch_width")
-            # Add spacing between left and right columns
-            self.layout = row(left, right, sizing_mode="stretch_width", spacing=30) if left is not None else right
+            right = column(*right_col, sizing_mode="stretch_width", max_width=1200)
+            # Add spacing between left and right columns, and cap total width
+            self.layout = row(left, right, sizing_mode="stretch_width", spacing=30, max_width=1400) if left is not None else right
             if self.show_plot:
                 show(self.layout)
             return self.layout
@@ -475,33 +506,24 @@ class InteractiveTimeSeriesPlot:
     def compute_moving_average(self, kernels, bandwidths, yerr_col=None, x_out=None):
         """
         Compute moving averages for all value_cols for each kernel/bandwidth combination using kernel_smooth_with_uncertainty.
-        kernels: list of kernel names (e.g. ['gaussian', 'uniform'])
-        bandwidths: list of bandwidth values
-        Returns a concatenated DataFrame with columns: date, value_col(s), kernel, bandwidth, (optionally) uncertainty.
+        Returns a DataFrame with columns: date, {param}_{kernel}_{bandwidth} for each param/kernel/bandwidth.
         """
         from myutils.utils import kernel_smooth_with_uncertainty
-        all_results = []
         if x_out is None:
             x_out = self.df[self.date_col]
-        
         if not isinstance(kernels, list):
             kernels = [kernels]
         if not isinstance(bandwidths, list):
             bandwidths = [bandwidths]
+        df_out = pd.DataFrame({"date": pd.to_datetime(x_out)})
         for kernel in kernels:
             for bandwidth in bandwidths:
-                results = {}
-                results['date'] = pd.to_datetime(x_out)
                 for col in self.value_cols:
-                    smoothed, smoothed_err = kernel_smooth_with_uncertainty(
+                    smoothed, _ = kernel_smooth_with_uncertainty(
                         self.df, self.date_col, col, yerr_col=yerr_col, kernel=kernel, bandwidth=bandwidth, x_out=x_out
                     )
-                    results[col] = smoothed
-                    results[f'{col}_err'] = smoothed_err
-                results['kernel'] = [kernel] * len(x_out)
-                results['bandwidth'] = [bandwidth] * len(x_out)
-                all_results.append(pd.DataFrame(results))
-        return pd.concat(all_results, ignore_index=True)
+                    df_out[f"{col}_{kernel}_{bandwidth}"] = smoothed
+        return df_out
 
 
 def moving_average_controls(df_ma, value_cols, kernels, bandwidths, initial_kernel, initial_bandwidth, ma_source):
@@ -526,9 +548,7 @@ def moving_average_controls(df_ma, value_cols, kernels, bandwidths, initial_kern
         var idx = slider.value;
         var bw = bandwidths[idx];
         slider.title = 'Bandwidth: ' + bw;
-        // Overwrite the label in the DOM (robust for Bokeh >=2.4, all themes)
         setTimeout(function() {
-            // Try both .bk-slider-title and aria-label for accessibility
             var labels = document.querySelectorAll('.bk-slider-title, label[for]');
             for (var i = 0; i < labels.length; ++i) {
                 if (labels[i].textContent.includes('Bandwidth:')) {
@@ -540,13 +560,13 @@ def moving_average_controls(df_ma, value_cols, kernels, bandwidths, initial_kern
             }
         }, 20);
     """))
-    js_ma_data = {col: df_ma[col].tolist() for col in value_cols}
-    js_ma_data["kernel"] = df_ma["kernel"].tolist()
-    js_ma_data["bandwidth"] = df_ma["bandwidth"].tolist()
+    # Prepare JS data for wide format
+    js_ma_data = {col: df_ma[col].tolist() for col in df_ma.columns if col != 'date'}
     js_ma_data["date"] = (pd.to_datetime(df_ma["date"]).astype(np.int64) // 10**6).tolist()
     js_ma_data_json = json.dumps(js_ma_data)
-    js_bandwidths_json = json.dumps([int(b) for b in bandwidths_sorted])
     value_cols_json = json.dumps(value_cols)
+    js_kernels_json = json.dumps([str(k) for k in kernels])
+    js_bandwidths_json = json.dumps([int(b) for b in bandwidths_sorted])
     js_code = """
 const kernel = kernel_select.value;
 const bandwidths = %s;
@@ -566,118 +586,15 @@ setTimeout(function() {
 }, 20);
 const all_data = %s;
 const value_cols = %s;
-const n = all_data['kernel'].length;
 var new_data = {};
-for (var i = 0; i < value_cols.length; ++i) { new_data[value_cols[i]] = []; }
-new_data['date'] = [];
-for (var i = 0; i < n; ++i) {
-    if (String(all_data['kernel'][i]) == kernel && all_data['bandwidth'][i] == bandwidth) {
-        for (var j = 0; j < value_cols.length; ++j) {
-            var col = value_cols[j];
-            new_data[col].push(all_data[col][i]);
-        }
-        new_data['date'].push(all_data['date'][i]);
-    }
+new_data['date'] = all_data['date'];
+for (var i = 0; i < value_cols.length; ++i) {
+    var param = value_cols[i];
+    var colname = param + '_' + kernel + '_' + bandwidth;
+    new_data[param] = all_data[colname];
 }
-// --- Save axis and slider ranges ---
-function findFigure(obj) {
-    if (!obj) return null;
-    if (obj.type === 'Figure') return obj;
-    if (obj.children && obj.children.length) {
-        for (var i = 0; i < obj.children.length; ++i) {
-            var found = findFigure(obj.children[i]);
-            if (found) return found;
-        }
-    }
-    return null;
-}
-function findSliders(obj, sliders) {
-    if (!obj) return;
-    if (obj.type === 'RangeSlider') sliders.push(obj);
-    if (obj.children && obj.children.length) {
-        for (var i = 0; i < obj.children.length; ++i) {
-            findSliders(obj.children[i], sliders);
-        }
-    }
-}
-var fig = null;
-if (typeof Bokeh !== 'undefined' && Bokeh.documents.length > 0) {
-    var roots = Bokeh.documents[0].roots();
-    for (var i = 0; i < roots.length; ++i) {
-        fig = findFigure(roots[i]);
-        if (fig) break;
-    }
-}
-var xr_start = null, xr_end = null, yr_start = null, yr_end = null;
-var slider_states = [];
-var all_sliders = [];
-if (fig) {
-    if (fig.x_range) { xr_start = fig.x_range.start; xr_end = fig.x_range.end; }
-    if (fig.y_range) { yr_start = fig.y_range.start; yr_end = fig.y_range.end; }
-    if (fig.parent) { findSliders(fig.parent, all_sliders); }
-    else { findSliders(fig, all_sliders); }
-    for (var i = 0; i < all_sliders.length; ++i) {
-        var s = all_sliders[i];
-        slider_states.push({
-            id: s.id,
-            value: s.value.slice ? s.value.slice() : s.value,
-            bounds: s.bounds ? (s.bounds.slice ? s.bounds.slice() : s.bounds) : null
-        });
-    }
-}
-console.log('[DEBUG] --- Before update ---');
-if (fig) {
-    if (fig.x_range) console.log('[DEBUG] x_range before:', fig.x_range.start, fig.x_range.end, fig.x_range.bounds);
-    if (fig.y_range) console.log('[DEBUG] y_range before:', fig.y_range.start, fig.y_range.end, fig.y_range.bounds);
-}
-console.log('[DEBUG] All sliders before:');
-for (var i = 0; i < all_sliders.length; ++i) {
-    var s = all_sliders[i];
-    console.log('[DEBUG] Slider', s.title, 'id', s.id, 'value', s.value, 'bounds', s.bounds);
-}
-console.log('[DEBUG] new_data keys:', Object.keys(new_data));
-console.log('[DEBUG] new_data lengths:', Object.fromEntries(Object.entries(new_data).map(function(entry) { return [entry[0], entry[1].length]; })));
-// --- Update data ---
 ma_source.data = new_data;
 ma_source.change.emit();
-// --- Restore axis and slider ranges ---
-if (fig) {
-    if (fig.x_range && xr_start !== null && xr_end !== null) {
-        fig.x_range.start = xr_start;
-        fig.x_range.end = xr_end;
-        fig.x_range.bounds = [xr_start, xr_end];
-    }
-    if (fig.y_range && yr_start !== null && yr_end !== null) {
-        fig.y_range.start = yr_start;
-        fig.y_range.end = yr_end;
-        fig.y_range.bounds = [yr_start, yr_end];
-    }
-    // Restore RangeSlider values and bounds
-    var all_sliders_after = [];
-    if (fig.parent) { findSliders(fig.parent, all_sliders_after); }
-    else { findSliders(fig, all_sliders_after); }
-    for (var i = 0; i < all_sliders_after.length; ++i) {
-        var s = all_sliders_after[i];
-        for (var j = 0; j < slider_states.length; ++j) {
-            if (s.id === slider_states[j].id) {
-                if (slider_states[j].value) s.value = slider_states[j].value.slice ? slider_states[j].value.slice() : slider_states[j].value;
-                if (slider_states[j].bounds) s.bounds = slider_states[j].bounds.slice ? slider_states[j].bounds.slice() : slider_states[j].bounds;
-                s.change.emit();
-            }
-        }
-    }
-    // Print after restore
-    console.log('[DEBUG] --- After update ---');
-    if (fig.x_range) console.log('[DEBUG] x_range after:', fig.x_range.start, fig.x_range.end, fig.x_range.bounds);
-    if (fig.y_range) console.log('[DEBUG] y_range after:', fig.y_range.start, fig.y_range.end, fig.y_range.bounds);
-    console.log('[DEBUG] All sliders after:');
-    for (var i = 0; i < all_sliders_after.length; ++i) {
-        var s = all_sliders_after[i];
-        console.log('[DEBUG] Slider', s.title, 'id', s.id, 'value', s.value, 'bounds', s.bounds);
-    }
-}
-if (fig && fig.x_range) { fig.x_range.change.emit(); }
-if (fig && fig.y_range) { fig.y_range.change.emit(); }
 """ % (js_bandwidths_json, js_ma_data_json, value_cols_json)
 
     callback = CustomJS(
@@ -686,29 +603,5 @@ if (fig && fig.y_range) { fig.y_range.change.emit(); }
     )
     kernel_select.js_on_change("value", callback)
     bandwidth_slider.js_on_change("value", callback)
-    # Set the initial title and DOM label correctly
     bandwidth_slider.title = f"Bandwidth: {bandwidths_sorted[bandwidth_slider.value]}"
-    # Also update the DOM label on initial render
-    import bokeh
-    from bokeh.io import push_notebook
-    def _force_label():
-        from IPython.display import display, Javascript
-        js = f"""
-        setTimeout(function() {{
-            var labels = document.querySelectorAll('.bk-slider-title, label[for]');
-            for (var i = 0; i < labels.length; ++i) {{
-                if (labels[i].textContent.includes('Bandwidth:')) {{
-                    labels[i].textContent = 'Bandwidth: {bandwidths_sorted[bandwidth_slider.value]}';
-                }}
-                if (labels[i].getAttribute && labels[i].getAttribute('aria-label') && labels[i].getAttribute('aria-label').includes('Bandwidth:')) {{
-                    labels[i].setAttribute('aria-label', 'Bandwidth: {bandwidths_sorted[bandwidth_slider.value]}');
-                }}
-            }}
-        }}, 20);
-        """
-        display(Javascript(js))
-    try:
-        _force_label()
-    except Exception:
-        pass
     return kernel_select, bandwidth_slider, callback

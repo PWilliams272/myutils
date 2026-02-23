@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myutils"
+version = "0.1.0"
+description = "Various utility functions"
+authors = [
+    { name = "Peter Williams", email = "pwilliams272@gmail.com" }
+]
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "Operating System :: OS Independent"
+]
+
+dependencies = [
+    "pandas",
+    "matplotlib",
+    "numpy",
+    "tqdm",
+    "scipy"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["myutils"]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.urls]
+Homepage = "https://github.com/pwilliams272/myutils"
